@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """CLI for backing up Claude Code session history.
 
-Monitors ~/.claude/projects/ and syncs to a backup location before
-Claude's automatic cleanup removes old sessions.
+Monitors ~/.claude/projects/ and creates timestamped zip archives
+before Claude's automatic cleanup removes old sessions.
 """
 
 import json
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -55,14 +55,6 @@ def get_backup_root() -> Path:
     return Path(config.get("backup_root", str(DEFAULT_BACKUP_ROOT)))
 
 
-def get_backup_dir() -> Path:
-    return get_backup_root() / "backups"
-
-
-def get_archives_dir() -> Path:
-    return get_backup_root() / "archives"
-
-
 def get_meta_file() -> Path:
     return get_backup_root() / ".sync_meta.json"
 
@@ -81,30 +73,6 @@ def success(text: str) -> str:
 
 def warning(text: str) -> str:
     return f"[yellow]⚠ {text}[/yellow]"
-
-
-def archive_backups() -> Optional[Path]:
-    """Create a zip archive of the current backups directory.
-
-    Returns the path to the created archive, or None if backup dir is empty.
-    """
-    backup_dir = get_backup_dir()
-    archives_dir = get_archives_dir()
-
-    if not backup_dir.exists() or not any(backup_dir.iterdir()):
-        return None
-
-    archives_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create archive name with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    archive_name = f"backup_{timestamp}"
-    archive_path = archives_dir / archive_name
-
-    # Create zip archive
-    shutil.make_archive(str(archive_path), "zip", backup_dir)
-
-    return Path(f"{archive_path}.zip")
 
 
 def get_oldest_session_date(path: Path) -> Optional[datetime]:
@@ -170,6 +138,14 @@ def get_dir_size(path: Path) -> str:
         return "?"
 
 
+def get_archives() -> list[Path]:
+    """Get list of archive zip files sorted by date (newest first)."""
+    backup_root = get_backup_root()
+    if not backup_root.exists():
+        return []
+    return sorted(backup_root.glob("backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
 @app.command()
 def status() -> None:
     """Show current sync status.
@@ -178,46 +154,38 @@ def status() -> None:
       [dim]$[/dim] claude-history status
     """
     meta = load_meta()
-    backup_dir = get_backup_dir()
+    backup_root = get_backup_root()
+    archives = get_archives()
 
     # Get current state
     projects_oldest = get_oldest_session_date(CLAUDE_PROJECTS)
     projects_newest = get_newest_session_date(CLAUDE_PROJECTS)
-    backup_oldest = get_oldest_session_date(backup_dir)
-    backup_newest = get_newest_session_date(backup_dir)
-
     projects_count = count_sessions(CLAUDE_PROJECTS)
-    backup_count = count_sessions(backup_dir)
-
     projects_size = get_dir_size(CLAUDE_PROJECTS)
-    backup_size = get_dir_size(backup_dir)
+
+    # Archive stats
+    archive_count = len(archives)
+    archive_total_size = get_dir_size(backup_root) if backup_root.exists() else "0"
 
     # Build status table
     table = Table(title="Claude History Sync Status")
     table.add_column("Metric", style="cyan")
-    table.add_column("~/.claude/projects", style="white")
-    table.add_column("Backup", style="white")
+    table.add_column("Value", style="white")
 
-    table.add_row(
-        "Session count",
-        str(projects_count),
-        str(backup_count),
-    )
-    table.add_row(
-        "Size",
-        projects_size,
-        backup_size,
-    )
+    table.add_row("Sessions in ~/.claude/projects", str(projects_count))
+    table.add_row("Projects size", projects_size)
     table.add_row(
         "Oldest session",
         projects_oldest.strftime("%Y-%m-%d %H:%M") if projects_oldest else "N/A",
-        backup_oldest.strftime("%Y-%m-%d %H:%M") if backup_oldest else "N/A",
     )
     table.add_row(
         "Newest session",
         projects_newest.strftime("%Y-%m-%d %H:%M") if projects_newest else "N/A",
-        backup_newest.strftime("%Y-%m-%d %H:%M") if backup_newest else "N/A",
     )
+    table.add_row("", "")
+    table.add_row("Archives saved", str(archive_count))
+    table.add_row("Total archive size", archive_total_size)
+    table.add_row("Backup location", str(backup_root))
 
     console.print(table)
 
@@ -251,98 +219,42 @@ def status() -> None:
 @app.command()
 def sync(
     force: bool = typer.Option(False, "--force", "-f", help="Force sync even if not needed"),
-    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would be synced"),
-    no_archive: bool = typer.Option(False, "--no-archive", help="Skip archiving before sync"),
 ) -> None:
-    """Sync new sessions to backup.
+    """Create a new backup archive of all sessions.
 
-    Automatically archives previous backups before syncing.
+    Creates a timestamped zip of ~/.claude/projects/
 
     [bold cyan]EXAMPLES[/bold cyan]:
       [dim]$[/dim] claude-history sync
       [dim]$[/dim] claude-history sync --force
-      [dim]$[/dim] claude-history sync --dry-run
-      [dim]$[/dim] claude-history sync --no-archive
     """
     if not CLAUDE_PROJECTS.exists():
         console.print(error("~/.claude/projects not found"))
         raise typer.Exit(code=1)
 
-    backup_dir = get_backup_dir()
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_root = get_backup_root()
+    backup_root.mkdir(parents=True, exist_ok=True)
 
-    # Find new/updated sessions
-    existing_backups = {d.name for d in backup_dir.iterdir() if d.is_dir()}
-    to_sync = []
+    # Create archive name with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_name = f"backup_{timestamp}"
+    archive_path = backup_root / archive_name
 
-    for project in CLAUDE_PROJECTS.iterdir():
-        if not project.is_dir():
-            continue
+    console.print(info("Creating backup archive..."))
 
-        backup_path = backup_dir / project.name
+    # Create zip archive directly from projects
+    shutil.make_archive(str(archive_path), "zip", CLAUDE_PROJECTS)
 
-        if project.name not in existing_backups:
-            # New project
-            to_sync.append((project, backup_path, "new"))
-        else:
-            # Check if updated (newer files)
-            project_newest = max(
-                (f.stat().st_mtime for f in project.rglob("*") if f.is_file()),
-                default=0,
-            )
-            backup_newest = max(
-                (f.stat().st_mtime for f in backup_path.rglob("*") if f.is_file()),
-                default=0,
-            )
-            if project_newest > backup_newest:
-                to_sync.append((project, backup_path, "updated"))
-
-    if not to_sync:
-        console.print(success("Backup is up to date. Nothing to sync."))
-        return
-
-    # Show what will be synced
-    console.print(f"\n{info(f'Found {len(to_sync)} projects to sync:')}")
-    for src, _, status in to_sync[:10]:
-        console.print(f"  [{status}] {src.name}")
-    if len(to_sync) > 10:
-        console.print(f"  ... and {len(to_sync) - 10} more")
-
-    if dry_run:
-        console.print(f"\n{info('Dry run - no changes made')}")
-        return
-
-    # Archive previous backups before syncing
-    if not no_archive:
-        console.print(f"{info('Archiving previous backups...')}")
-        archive_path = archive_backups()
-        if archive_path:
-            size = get_dir_size(archive_path)
-            console.print(success(f"Created archive: {archive_path.name} ({size})"))
-        else:
-            console.print(info("No previous backups to archive"))
-
-    # Perform sync
-    console.print(f"{info('Syncing...')}")
-    synced = 0
-    for src, dst, _ in to_sync:
-        try:
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst)
-            synced += 1
-        except Exception as e:
-            console.print(error(f"Failed to sync {src.name}: {e}"))
+    final_path = Path(f"{archive_path}.zip")
+    size = get_dir_size(final_path)
+    console.print(success(f"Created: {final_path.name} ({size})"))
 
     # Update metadata
     projects_oldest = get_oldest_session_date(CLAUDE_PROJECTS)
     meta = load_meta()
     meta["last_sync"] = datetime.now().isoformat()
     meta["last_sync_oldest"] = projects_oldest.isoformat() if projects_oldest else None
-    meta["last_sync_count"] = synced
     save_meta(meta)
-
-    console.print(success(f"Synced {synced} projects"))
 
 
 @app.command()
@@ -546,42 +458,14 @@ def logs(
         console.print(info("Log file is empty"))
 
 
-@app.command()
-def archive() -> None:
-    """Manually create an archive of current backups.
-
-    [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history archive
-    """
-    backup_dir = get_backup_dir()
-    if not backup_dir.exists() or not any(backup_dir.iterdir()):
-        console.print(warning("No backups to archive"))
-        return
-
-    console.print(info("Creating archive..."))
-    archive_path = archive_backups()
-
-    if archive_path:
-        size = get_dir_size(archive_path)
-        console.print(success(f"Created: {archive_path.name} ({size})"))
-    else:
-        console.print(error("Failed to create archive"))
-        raise typer.Exit(code=1)
-
-
-@app.command("list-archives")
+@app.command("list")
 def list_archives() -> None:
     """List all backup archives.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history list-archives
+      [dim]$[/dim] claude-history list
     """
-    archives_dir = get_archives_dir()
-    if not archives_dir.exists():
-        console.print(info("No archives directory yet"))
-        return
-
-    archives = sorted(archives_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    archives = get_archives()
 
     if not archives:
         console.print(info("No archives found"))
@@ -599,7 +483,8 @@ def list_archives() -> None:
 
     console.print(table)
 
-    total_size = get_dir_size(archives_dir)
+    backup_root = get_backup_root()
+    total_size = get_dir_size(backup_root)
     console.print(f"\n{info(f'Total: {len(archives)} archives, {total_size}')}")
 
 
@@ -608,12 +493,11 @@ def config(
     backup_root: Optional[str] = typer.Option(
         None, "--backup-root", "-b", help="Set backup root directory"
     ),
-    show: bool = typer.Option(False, "--show", "-s", help="Show current config"),
 ) -> None:
     """View or set configuration.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history config --show
+      [dim]$[/dim] claude-history config
       [dim]$[/dim] claude-history config --backup-root ~/my-backups
     """
     cfg = load_config()
@@ -624,17 +508,13 @@ def config(
         cfg["backup_root"] = str(new_root)
         save_config(cfg)
         console.print(success(f"Backup root set to: {new_root}"))
-        console.print(info(f"Backups: {new_root / 'backups'}"))
-        console.print(info(f"Archives: {new_root / 'archives'}"))
         return
 
     # Show current config
     current_root = get_backup_root()
     console.print(
         Panel(
-            f"[cyan]Backup root:[/cyan] {current_root}\n"
-            f"[cyan]Backups:[/cyan] {get_backup_dir()}\n"
-            f"[cyan]Archives:[/cyan] {get_archives_dir()}\n"
+            f"[cyan]Backup location:[/cyan] {current_root}\n"
             f"[cyan]Config file:[/cyan] {CONFIG_FILE}",
             title="Configuration",
             border_style="cyan",

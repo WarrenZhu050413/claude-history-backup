@@ -1,6 +1,6 @@
 [project]
 name = "claude-history-backup"
-version = "0.2.0"
+version = "0.3.0"
 description = "Backup and manage Claude Code session history"
 authors = [
     {name = "Warren Zhu", email = "wzhu@college.harvard.edu"}
