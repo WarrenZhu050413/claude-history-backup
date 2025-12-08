@@ -1,0 +1,18 @@
+# Backup data (large, local only)
+backups/
+archives/
+.sync_meta.json
+
+# Build artifacts
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Other
+.quibbler/
+.annotations/
