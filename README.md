@@ -2,6 +2,10 @@
 
 Backup Claude Code session history before automatic cleanup removes old sessions. As of December 2025, Claude Code removes sessions older than ~1 month.
 
+## Motivation
+
+The data may be useful in the future. Useful for what? Well, let us focus on collecting the data, ["and then the answer to that question will reveal itself. I think there will be lots of possible answers"](https://www.dwarkesh.com/p/ilya-sutskever-2).
+
 ## Install
 
 ```bash
